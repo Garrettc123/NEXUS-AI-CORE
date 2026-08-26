@@ -1,0 +1,40 @@
+# NEXUS-AI-CORE dependencies
+fastapi>=0.111.0
+uvicorn[standard]>=0.29.0
+httpx>=0.27.0
+pydantic>=2.7.0
+python-dotenv>=1.0.0
+
+# Shopify
+ShopifyAPI>=12.5.0
+
+# Stripe
+stripe>=9.9.0
+
+# HubSpot
+hubspot-api-client>=9.0.0
+
+# Notion
+notion-client>=2.2.1
+
+# Linear (REST + GraphQL)
+gql>=3.5.0
+requests>=2.31.0
+
+# Supabase
+supabase>=2.5.0
+
+# HuggingFace
+huggingface-hub>=0.23.0
+transformers>=4.41.0
+torch>=2.3.0
+sentence-transformers>=3.0.0
+
+# DocuSign
+docusign-esign>=3.26.0
+
+# Utilities
+orjson>=3.10.0
+tenacity>=8.3.0
+structlog>=24.1.0
+apscheduler>=3.10.4

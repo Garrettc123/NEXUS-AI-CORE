@@ -1,0 +1,40 @@
+name: NEXUS Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Lint
+        run: |
+          pip install ruff
+          ruff check . --select E,F,W --ignore E501
+
+      - name: Test integration imports
+        run: |
+          python -c "from orchestrator.events import NexusEvent; print('Events OK')"
+          python -c "from orchestrator.router import route_event; print('Router OK')"
+          python -c "from integrations import shopify_client, stripe_client, hubspot_client; print('Integrations OK')"
+
+      - name: Deploy to Railway
+        if: github.ref == 'refs/heads/main'
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: |
+          npm install -g @railway/cli
+          railway up --service nexus-ai-core
