@@ -1,5 +1,8 @@
 """Shopify integration — REST Admin API + webhook verification."""
-import hashlib, hmac, base64, os
+import base64
+import hashlib
+import hmac
+import os
 import httpx
 from orchestrator.events import NexusEvent
 
@@ -25,9 +28,12 @@ def verify_and_parse_shopify_webhook(payload: bytes, hmac_header: str, topic: st
 
 
 def _classify_shopify(topic: str) -> str:
-    if "orders" in topic:   return "revenue"
-    if "products" in topic: return "inventory"
-    if "customers" in topic: return "crm_update"
+    if "orders" in topic:
+        return "revenue"
+    if "products" in topic:
+        return "inventory"
+    if "customers" in topic:
+        return "crm_update"
     return "default"
 
 
