@@ -1,8 +1,7 @@
 """NEXUS-AI-CORE — FastAPI entry point."""
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 import structlog
-import os
 
 from orchestrator.router import route_event
 from orchestrator.events import NexusEvent

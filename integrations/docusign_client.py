@@ -1,6 +1,5 @@
 """DocuSign integration — contract creation, envelope sending, status polling."""
 import os
-import base64
 from docusign_esign import ApiClient, EnvelopesApi, EnvelopeDefinition, Document, Signer, \
     SignHere, Tabs, Recipients
 

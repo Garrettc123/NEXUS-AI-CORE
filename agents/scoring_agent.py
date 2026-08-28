@@ -1,7 +1,7 @@
 """Deal scoring agent — uses HuggingFace to score and route deals."""
 import structlog
 from orchestrator.events import NexusEvent
-from integrations import huggingface_client, hubspot_client, linear_client
+from integrations import huggingface_client, linear_client
 
 log = structlog.get_logger()
 

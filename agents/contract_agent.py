@@ -1,5 +1,6 @@
 """Contract agent — creates and sends DocuSign envelopes on deal close."""
-import base64, os, structlog
+import base64
+import structlog
 from orchestrator.events import NexusEvent
 from integrations import docusign_client, notion_client, linear_client
 
