@@ -30,6 +30,11 @@ jobs:
           python -c "from orchestrator.events import NexusEvent; print('Events OK')"
           python -c "from orchestrator.router import route_event; print('Router OK')"
           python -c "from integrations import shopify_client, stripe_client, hubspot_client; print('Integrations OK')"
+          python -c "from core.lead_scorer import compute_score; print('Scorer OK')"
+          python -c "from core.acquisition import track_github_cta_click; print('Acquisition OK')"
+
+      - name: Run tests
+        run: pytest tests/ -v --tb=short
 
       - name: Deploy to Railway
         if: github.ref == 'refs/heads/main'
