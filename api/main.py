@@ -11,7 +11,7 @@ from __future__ import annotations
 import os
 import uuid
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Literal
 
 import structlog
 from fastapi import FastAPI, HTTPException
@@ -30,14 +30,17 @@ app = FastAPI(
 
 SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY", "")
 SENDGRID_FROM_EMAIL = os.getenv("SENDGRID_FROM_EMAIL", "noreply@garcar.io")
-STRIPE_STARTER_PRICE_ID = os.getenv("STRIPE_PRICE_ID_STARTER", "")
+STRIPE_STARTER_PRICE_ID = os.getenv(
+    "STRIPE_STARTER_PRICE_ID",
+    os.getenv("STRIPE_PRICE_ID_STARTER", ""),
+)
 
 
 # ── Pydantic models ──────────────────────────────────────────────────────────
 
 class LeadCreate(BaseModel):
     email: EmailStr
-    source: str = "direct"              # organic | referral | direct
+    source: Literal["organic", "referral", "direct"] = "direct"
     utm_source: str = ""
     utm_medium: str = ""
     first_name: str = ""
@@ -50,6 +53,11 @@ class EventCreate(BaseModel):
 
 
 # ── POST /leads ──────────────────────────────────────────────────────────────
+
+@app.get("/health")
+async def health() -> dict:
+    return {"status": "ok", "service": "nexus-acquisition-api", "version": "1.0.0"}
+
 
 @app.post("/leads", status_code=201)
 async def capture_lead(body: LeadCreate) -> dict:
@@ -188,6 +196,7 @@ async def _trigger_conversion(sb: Any, lead: dict, score: int) -> bool:
         checkout_url = await create_payment_link(
             amount_cents=9900,
             description="Garcar Enterprise — Starter Plan",
+            price_id=STRIPE_STARTER_PRICE_ID or None,
         )
     except Exception as exc:
         log.warning("stripe_checkout_failed", error=str(exc), email=email)
@@ -240,11 +249,12 @@ async def _send_outreach_email(to_email: str, checkout_url: str, score: int) -> 
         ],
     }
     async with httpx.AsyncClient() as c:
+        auth_header = "Bearer " + SENDGRID_API_KEY
         r = await c.post(
             "https://api.sendgrid.com/v3/mail/send",
             json=payload,
             headers={
-                "Authorization": "******",
+                "Authorization": auth_header,
                 "Content-Type": "application/json",
             },
             timeout=15,

@@ -60,20 +60,15 @@ def score_lead(lead: dict[str, Any], events: list[dict[str, Any]]) -> dict[str, 
     # Derive last_seen_at from the most recent event or lead created_at
     last_seen_at: datetime | None = None
     if events:
-        ts_strings = [e.get("created_at", "") for e in events if e.get("created_at")]
-        if ts_strings:
-            latest = max(ts_strings)
-            try:
-                last_seen_at = datetime.fromisoformat(latest.replace("Z", "+00:00"))
-            except ValueError:
-                pass
+        event_timestamps = [
+            parsed
+            for e in events
+            if (parsed := _parse_timestamp(e.get("created_at"))) is not None
+        ]
+        if event_timestamps:
+            last_seen_at = max(event_timestamps)
     if last_seen_at is None and lead.get("created_at"):
-        try:
-            last_seen_at = datetime.fromisoformat(
-                lead["created_at"].replace("Z", "+00:00")
-            )
-        except ValueError:
-            pass
+        last_seen_at = _parse_timestamp(lead.get("created_at"))
 
     score = compute_score(source, event_count, last_seen_at)
     return {
@@ -98,3 +93,12 @@ def _recency_bonus(last_seen_at: datetime | None) -> int:
         if days_ago < threshold_days:
             return bonus
     return 0
+
+
+def _parse_timestamp(raw_timestamp: Any) -> datetime | None:
+    if not isinstance(raw_timestamp, str) or not raw_timestamp:
+        return None
+    try:
+        return datetime.fromisoformat(raw_timestamp.replace("Z", "+00:00"))
+    except ValueError:
+        return None

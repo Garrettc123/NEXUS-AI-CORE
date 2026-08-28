@@ -168,6 +168,28 @@ class TestScoreLead:
         result = score_lead(lead, [])
         assert result["score"] == 60
 
+    def test_most_recent_event_uses_datetime_not_lexicographic_string(self):
+        lead = _lead("organic", created_hours_ago=48)
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        older_absolute = now - timedelta(hours=3)
+        newer_absolute = now - timedelta(hours=2)
+        events = [
+            {
+                "id": "ev-1",
+                "event_type": "click",
+                "created_at": older_absolute.astimezone(
+                    timezone(timedelta(hours=2))
+                ).isoformat(),
+            },
+            {
+                "id": "ev-2",
+                "event_type": "click",
+                "created_at": newer_absolute.isoformat(),
+            },
+        ]
+        result = score_lead(lead, events)
+        assert result["score"] == 70
+
 
 # ── acquisition: GitHub CTA ─────────────────────────────────────────────────
 

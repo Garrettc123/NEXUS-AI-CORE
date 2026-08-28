@@ -30,9 +30,17 @@ def _classify_stripe(event_type: str) -> str:
     return "default"
 
 
-async def create_payment_link(amount_cents: int, currency: str = "usd",
-                               description: str = "Garcar Service") -> str:
+async def create_payment_link(
+    amount_cents: int,
+    currency: str = "usd",
+    description: str = "Garcar Service",
+    price_id: str | None = None,
+) -> str:
     """Create a one-time Stripe Payment Link and return the URL."""
+    if price_id:
+        link = stripe.PaymentLink.create(line_items=[{"price": price_id, "quantity": 1}])
+        return link["url"]
+
     product = stripe.Product.create(name=description)
     price = stripe.Price.create(
         product=product["id"],
