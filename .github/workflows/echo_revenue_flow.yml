@@ -1,0 +1,126 @@
+name: 🔥 Echo Revenue Flow — Full System Integration
+
+on:
+  schedule:
+    # Run every 4 hours autonomously
+    - cron: '0 */4 * * *'
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Flow mode (full | leads_only | payments_only)'
+        required: false
+        default: 'full'
+  push:
+    branches: [main]
+    paths:
+      - 'integrations/echo_revenue_flow.py'
+      - 'integrations/base_coinbase_client.py'
+
+env:
+  PYTHONPATH: ${{ github.workspace }}
+
+jobs:
+  echo_revenue_flow:
+    name: 💰 Echo Revenue Flow Active
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - name: Checkout NEXUS-AI-CORE
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: 🔥 Run Echo Revenue Flow
+        env:
+          STRIPE_SECRET_KEY: ${{ secrets.STRIPE_SECRET_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+          LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
+          HUBSPOT_API_KEY: ${{ secrets.HUBSPOT_API_KEY }}
+          SHOPIFY_STORE_DOMAIN: ${{ secrets.SHOPIFY_STORE_DOMAIN }}
+          SHOPIFY_ACCESS_TOKEN: ${{ secrets.SHOPIFY_ACCESS_TOKEN }}
+          HUGGINGFACE_API_TOKEN: ${{ secrets.HUGGINGFACE_API_TOKEN }}
+          COINBASE_CDP_API_KEY: ${{ secrets.COINBASE_CDP_API_KEY }}
+          COINBASE_CDP_SECRET: ${{ secrets.COINBASE_CDP_SECRET }}
+          BASE_RPC_URL: ${{ secrets.BASE_RPC_URL }}
+          GARCAR_WALLET_ADDRESS: ${{ secrets.GARCAR_WALLET_ADDRESS }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_REVENUE_CHANNEL: ${{ secrets.SLACK_REVENUE_CHANNEL }}
+          FLOW_MODE: ${{ github.event.inputs.mode || 'full' }}
+        run: |
+          python -c "
+          import asyncio
+          import os
+          import json
+          from integrations.echo_revenue_flow import EchoRevenueFlow
+
+          async def main():
+              flow = EchoRevenueFlow()
+              # Demo batch — replace with live lead source in production
+              sample_leads = [
+                  {\"email\": \"cto@example.com\", \"company\": \"TechCorp\", \"title\": \"CTO\", \"industry\": \"SaaS\", \"deal_value_usd\": 4997.0},
+                  {\"email\": \"ceo@startup.io\", \"company\": \"Startup.io\", \"title\": \"CEO\", \"industry\": \"Fintech\", \"deal_value_usd\": 2497.0},
+              ]
+              result = await flow.run_full_echo_loop(sample_leads)
+              print(json.dumps(result, indent=2))
+              return result
+
+          asyncio.run(main())
+          "
+
+      - name: 📊 Post Revenue Summary to Slack
+        if: always()
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_REVENUE_CHANNEL: ${{ secrets.SLACK_REVENUE_CHANNEL }}
+        run: |
+          python -c "
+          import httpx, os
+          token = os.getenv('SLACK_BOT_TOKEN', '')
+          channel = os.getenv('SLACK_REVENUE_CHANNEL', '')
+          if token and channel:
+              httpx.post('https://slack.com/api/chat.postMessage', headers={'Authorization': f'Bearer {token}'}, json={
+                  'channel': channel,
+                  'text': ':fire: *Echo Revenue Flow Complete* — NEXUS-AI-CORE ran full system integration cycle. Check gc_ledger for revenue updates.',
+                  'unfurl_links': False
+              })
+          "
+
+  shopify_revenue_sync:
+    name: 🛍️ Shopify Revenue Sync
+    runs-on: ubuntu-latest
+    needs: echo_revenue_flow
+    if: always()
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      - run: pip install -r requirements.txt
+      - name: Sync Shopify orders to gc_ledger
+        env:
+          SHOPIFY_STORE_DOMAIN: ${{ secrets.SHOPIFY_STORE_DOMAIN }}
+          SHOPIFY_ACCESS_TOKEN: ${{ secrets.SHOPIFY_ACCESS_TOKEN }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: |
+          python -c "
+          import asyncio
+          from integrations.shopify_revenue_bridge import ShopifyRevenueBridge
+          async def main():
+              bridge = ShopifyRevenueBridge()
+              summary = await bridge.get_revenue_summary()
+              print('Shopify Revenue:', summary)
+          asyncio.run(main())
+          "
