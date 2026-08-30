@@ -16,14 +16,16 @@
 └────────────────────────┬────────────────────────────────┘
                          │
               ┌──────────▼──────────┐
-              │  orchestrator/      │
+              │  app/main.py        │
               │  router.py          │
-              │  (classify + route) │
+              │  + scheduler loop   │
               └──────────┬──────────┘
               ┌──────────▼──────────┐
               │  agents/            │
-              │  revenue · deals    │
-              │  scoring · outreach │
+              │  LeadScoringAgent   │
+              │  DealPipelineAgent  │
+              │  PropertyScoring... │
+              │  RevenueLoopAgent   │
               └──────────┬──────────┘
               ┌──────────▼──────────┐
               │  integrations/      │
@@ -60,14 +62,16 @@ score = source_weight + engagement_bonus + recency_bonus   (capped 0–100)
 
 Score ≥ 70 → auto-creates Stripe checkout + sends SendGrid outreach email.
 
-### Acquisition API
+### Autonomous Gateway API
 
 | Method | Path | Purpose |
 |--------|------|---------|
-| `POST` | `/leads` | Capture lead (dedupes by email) |
-| `GET`  | `/leads/{id}` | Lead + live score + events |
-| `POST` | `/leads/{id}/score` | Re-score; triggers conversion if qualified |
-| `POST` | `/leads/{id}/events` | Log engagement event |
+| `POST` | `/lead` | Submit lead and return GPT-4o-mini score |
+| `POST` | `/deal` | Create/update deal stage in Supabase |
+| `GET`  | `/deals` | List all deals and current stage |
+| `POST` | `/property/score` | Score property + cap rate estimate |
+| `POST` | `/stripe/webhook` | Verify Stripe signature and log revenue event |
+| `GET`  | `/health` | Service health check |
 
 ### Channels
 
@@ -92,12 +96,21 @@ STRIPE_PRICE_ID_STARTER=price_xxxx
 ```bash
 cp .env.example .env   # fill in all keys
 pip install -r requirements.txt
-uvicorn orchestrator.main:app --reload
+uvicorn app.main:app --reload
 ```
 
-## Env Vars
+## Secrets Reference
 
-See `.env.example` for all required keys.
+| Variable | Required | Purpose |
+|---|---|---|
+| `OPENAI_API_KEY` | yes | GPT-4o-mini lead scoring |
+| `SUPABASE_URL` | yes | Supabase project URL |
+| `SUPABASE_KEY` | yes | Supabase service key for writes |
+| `STRIPE_SECRET_KEY` | yes | Stripe API access |
+| `STRIPE_WEBHOOK_SECRET` | yes | Stripe webhook signature verification |
+| `PORT` | yes | Runtime port (Railway injects this) |
+
+All required values are listed in `.env.example`.
 
 ## License
 

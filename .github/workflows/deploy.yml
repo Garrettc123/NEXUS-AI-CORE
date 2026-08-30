@@ -37,7 +37,7 @@ jobs:
         run: pytest tests/ -v --tb=short
 
       - name: Deploy to Railway
-        if: github.ref == 'refs/heads/main'
+        if: github.ref == 'refs/heads/main' && secrets.RAILWAY_TOKEN != ''
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         run: |

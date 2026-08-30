@@ -9,9 +9,12 @@ _client: AsyncClient | None = None
 async def get_client() -> AsyncClient:
     global _client
     if _client is None:
+        supabase_key = os.getenv("SUPABASE_KEY", "") or os.getenv(
+            "SUPABASE_SERVICE_ROLE_KEY", ""
+        )
         _client = await acreate_client(
             os.getenv("SUPABASE_URL", ""),
-            os.getenv("SUPABASE_SERVICE_ROLE_KEY", ""),
+            supabase_key,
         )
     return _client
 
