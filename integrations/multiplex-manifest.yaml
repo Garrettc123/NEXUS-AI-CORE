@@ -1,0 +1,260 @@
+# GARCAR ENTERPRISE — NEXUS MULTIPLEX INTEGRATION MANIFEST
+# Generated: 2026-08-30T16:30:00-05:00
+# Owner: Garrett Carrol / Garcar Enterprise
+# Version: 1.0.0
+
+meta:
+  system: NEXUS-AI-CORE
+  environment: production
+  revision: multiplex-v1
+
+# ═══════════════════════════════════════════════
+# EVENT BUS — Canonical event types across all repos
+# ═══════════════════════════════════════════════
+events:
+  revenue:
+    - payment.succeeded
+    - payment.failed
+    - subscription.created
+    - subscription.cancelled
+    - invoice.finalized
+    - chargeback.opened
+  leads:
+    - lead.created
+    - lead.enriched
+    - lead.qualified
+    - lead.disqualified
+    - lead.converted
+  deals:
+    - deal.created
+    - deal.stage_changed
+    - deal.closed_won
+    - deal.closed_lost
+  agents:
+    - agent.task.dispatched
+    - agent.task.completed
+    - agent.task.failed
+    - agent.health.degraded
+    - agent.health.recovered
+  deployments:
+    - deploy.triggered
+    - deploy.succeeded
+    - deploy.failed
+    - deploy.rollback
+  blockchain:
+    - contract.deployed
+    - transaction.confirmed
+    - wallet.funded
+    - arbitrage.executed
+
+# ═══════════════════════════════════════════════
+# PRODUCER — NEXUS emits these events
+# ═══════════════════════════════════════════════
+producer:
+  repo: Garrettc123/NEXUS-AI-CORE
+  webhook_endpoint: ${NEXUS_WEBHOOK_SECRET}
+  emits:
+    - payment.succeeded
+    - payment.failed
+    - deal.created
+    - deal.closed_won
+    - deal.closed_lost
+    - lead.qualified
+    - agent.task.dispatched
+    - deploy.triggered
+
+# ═══════════════════════════════════════════════
+# CONSUMERS — Butler Core subscribes to NEXUS events
+# ═══════════════════════════════════════════════
+consumers:
+  butler_core:
+    repo: Garrettc123/autonomous-butler-core
+    trigger: repository_dispatch
+    event_type: nexus-event
+    subscribes_to:
+      - payment.succeeded     # → Revenue Ops agent
+      - payment.failed        # → Alert + retry agent
+      - deal.closed_won       # → Onboarding agent
+      - lead.qualified        # → Outreach agent
+      - agent.health.degraded # → Self-heal agent
+      - deploy.failed         # → Rollback agent
+  apex_revenue:
+    repo: Garrettc123/apex-revenue-system
+    trigger: repository_dispatch
+    event_type: nexus-payment
+    subscribes_to:
+      - payment.succeeded
+      - subscription.created
+  garcar_payment_loop:
+    repo: Garrettc123/garcar-payment-loop
+    trigger: repository_dispatch
+    event_type: nexus-ledger
+    subscribes_to:
+      - payment.succeeded
+      - invoice.finalized
+
+# ═══════════════════════════════════════════════
+# PLATFORM INTEGRATIONS
+# ═══════════════════════════════════════════════
+integrations:
+
+  github:
+    enabled: true
+    token_env: GITHUB_TOKEN
+    repos_managed: 263
+    dispatch_endpoint: https://api.github.com/repos/Garrettc123/{repo}/dispatches
+    actions:
+      - trigger_workflow
+      - create_issue
+      - push_file
+      - open_pr
+
+  slack:
+    enabled: true
+    workspace: garcarenterprise.slack.com
+    bot_channel: D0AN3SHHD50
+    token_env: SLACK_BOT_TOKEN
+    notify_on:
+      - payment.succeeded
+      - deal.closed_won
+      - agent.health.degraded
+      - deploy.failed
+    message_format: "[NEXUS] {event_type} — {summary} @ {timestamp}"
+
+  stripe:
+    enabled: true
+    token_env: STRIPE_SECRET_KEY
+    webhook_secret_env: STRIPE_WEBHOOK_SECRET
+    events:
+      - payment_intent.succeeded
+      - customer.subscription.created
+      - invoice.payment_succeeded
+      - charge.dispute.created
+    webhook_path: /webhooks/stripe
+
+  supabase:
+    enabled: true
+    url_env: SUPABASE_URL
+    key_env: SUPABASE_SERVICE_KEY
+    tables:
+      - revenue_events
+      - leads
+      - deals
+      - agent_tasks
+      - system_health
+    realtime_enabled: true
+
+  linear:
+    enabled: true
+    workspace: garrettc
+    team_key: GAR
+    token_env: LINEAR_API_KEY
+    api_url: https://api.linear.app/graphql
+    auto_create_issues_on:
+      - agent.health.degraded
+      - deploy.failed
+      - payment.failed
+      - deal.closed_lost
+
+  huggingface:
+    enabled: true
+    token_env: HF_TOKEN
+    inference_api: https://api-inference.huggingface.co/models
+    models:
+      - garrettc123/nexus-revenue-classifier
+      - sentence-transformers/all-MiniLM-L6-v2
+      - mistralai/Mistral-7B-Instruct-v0.3
+    use_cases:
+      - lead_scoring
+      - deal_classification
+      - document_summarization
+
+  shopify:
+    enabled: true
+    token_env: SHOPIFY_ACCESS_TOKEN
+    store_env: SHOPIFY_STORE_DOMAIN
+    api_version: "2024-10"
+    webhooks:
+      - orders/create
+      - orders/paid
+      - customers/create
+    sync_to: leads
+
+  notion:
+    enabled: true
+    token_env: NOTION_API_KEY
+    api_version: "2022-06-28"
+    databases:
+      revenue_tracker: ${NOTION_REVENUE_DB_ID}
+      system_registry: ${NOTION_REGISTRY_DB_ID}
+      deal_pipeline: ${NOTION_DEAL_DB_ID}
+    sync_on:
+      - deal.closed_won
+      - payment.succeeded
+
+  base_coinbase:
+    enabled: true
+    network: base-mainnet
+    rpc_url: https://mainnet.base.org
+    chain_id: 8453
+    wallet_env: BASE_WALLET_PRIVATE_KEY
+    contracts:
+      stablecoin: ${BASE_STABLECOIN_ADDRESS}
+      arbitrage: ${BASE_ARBITRAGE_CONTRACT}
+    actions:
+      - deploy_contract
+      - execute_transaction
+      - read_balance
+      - arbitrage_execute
+
+# ═══════════════════════════════════════════════
+# RETRY & CIRCUIT BREAKER POLICY
+# ═══════════════════════════════════════════════
+policy:
+  retry:
+    max_attempts: 3
+    backoff: exponential
+    base_delay_ms: 1000
+    max_delay_ms: 30000
+  circuit_breaker:
+    failure_threshold: 5
+    recovery_timeout_s: 60
+  dead_letter:
+    enabled: true
+    table: supabase.dead_letter_queue
+    alert_channel: slack.bot_channel
+
+# ═══════════════════════════════════════════════
+# REVENUE LOOP SEQUENCE
+# ═══════════════════════════════════════════════
+revenue_loop:
+  name: garcar-primary-revenue-loop
+  sequence:
+    1_lead_capture:
+      source: shopify.orders/create
+      target: lead-enrichment-engine
+      action: enrich_and_score
+    2_qualification:
+      source: huggingface.lead_scoring
+      target: supabase.leads
+      action: upsert_qualified_lead
+    3_outreach:
+      source: supabase.leads
+      target: autonomous-butler-core
+      action: dispatch_outreach_agent
+    4_payment:
+      source: stripe.payment_intent.succeeded
+      target: garcar-payment-loop
+      action: record_to_ledger
+    5_notify:
+      source: garcar-payment-loop
+      target: slack
+      action: post_revenue_alert
+    6_book:
+      source: garcar-payment-loop
+      target: notion.revenue_tracker
+      action: create_revenue_entry
+    7_deploy_next:
+      source: apex-revenue-system
+      target: nexus-orchestrator
+      action: trigger_next_campaign

@@ -1,0 +1,109 @@
+name: 🔗 NEXUS Multiplex Dispatcher
+
+on:
+  repository_dispatch:
+    types: [nexus-event, stripe-webhook, lead-event]
+  workflow_dispatch:
+    inputs:
+      event_type:
+        description: 'Event type to dispatch'
+        required: true
+        default: 'payment.succeeded'
+      payload:
+        description: 'JSON payload'
+        required: false
+        default: '{}'
+
+jobs:
+  dispatch-to-butler-core:
+    name: 🤖 Butler Core — Revenue Ops
+    runs-on: ubuntu-latest
+    if: |
+      github.event.client_payload.event_type == 'payment.succeeded' ||
+      github.event.client_payload.event_type == 'deal.closed_won' ||
+      github.event.client_payload.event_type == 'lead.qualified' ||
+      github.event.client_payload.event_type == 'agent.health.degraded' ||
+      github.event_name == 'workflow_dispatch'
+    steps:
+      - name: Dispatch to autonomous-butler-core
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.GH_PAT }}
+          repository: Garrettc123/autonomous-butler-core
+          event-type: nexus-event
+          client-payload: |
+            {
+              "event_type": "${{ github.event.client_payload.event_type || github.event.inputs.event_type }}",
+              "source": "NEXUS-AI-CORE",
+              "timestamp": "${{ github.event.created_at }}",
+              "payload": ${{ toJSON(github.event.client_payload) }}
+            }
+
+  dispatch-to-apex-revenue:
+    name: 💰 Apex Revenue — Payment Loop
+    runs-on: ubuntu-latest
+    if: |
+      github.event.client_payload.event_type == 'payment.succeeded' ||
+      github.event.client_payload.event_type == 'subscription.created'
+    steps:
+      - name: Dispatch to apex-revenue-system
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.GH_PAT }}
+          repository: Garrettc123/apex-revenue-system
+          event-type: nexus-payment
+          client-payload: |
+            {
+              "event_type": "${{ github.event.client_payload.event_type }}",
+              "amount": "${{ github.event.client_payload.amount }}",
+              "currency": "${{ github.event.client_payload.currency }}",
+              "customer_id": "${{ github.event.client_payload.customer_id }}"
+            }
+
+  dispatch-to-payment-loop:
+    name: 🔄 Payment Loop — Ledger Record
+    runs-on: ubuntu-latest
+    if: |
+      github.event.client_payload.event_type == 'payment.succeeded' ||
+      github.event.client_payload.event_type == 'invoice.finalized'
+    steps:
+      - name: Dispatch to garcar-payment-loop
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.GH_PAT }}
+          repository: Garrettc123/garcar-payment-loop
+          event-type: nexus-ledger
+          client-payload: |
+            {
+              "event_type": "${{ github.event.client_payload.event_type }}",
+              "amount": "${{ github.event.client_payload.amount }}",
+              "stripe_event_id": "${{ github.event.client_payload.stripe_event_id }}"
+            }
+
+  slack-notify:
+    name: 📣 Slack — Revenue Alert
+    runs-on: ubuntu-latest
+    needs: [dispatch-to-apex-revenue]
+    if: always()
+    steps:
+      - name: Notify Slack
+        run: |
+          EVENT="${{ github.event.client_payload.event_type || github.event.inputs.event_type }}"
+          AMOUNT="${{ github.event.client_payload.amount || 'N/A' }}"
+          curl -s -X POST -H 'Content-type: application/json' \
+            --data "{\"text\": \"[NEXUS] 💰 ${EVENT} — Amount: ${AMOUNT} | $(date -u)\"  }" \
+            ${{ secrets.SLACK_WEBHOOK_URL }}
+
+  linear-issue-on-failure:
+    name: 🎯 Linear — Auto-Issue on Failure
+    runs-on: ubuntu-latest
+    if: failure()
+    steps:
+      - name: Create Linear issue on pipeline failure
+        run: |
+          curl -s -X POST https://api.linear.app/graphql \
+            -H "Authorization: ${{ secrets.LINEAR_API_KEY }}" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "query": "mutation { issueCreate(input: { title: \"[AUTO] NEXUS Dispatcher failure: ${{ github.event.client_payload.event_type }}\", teamId: \"GAR\", priority: 1 }) { success issue { id identifier } } }"
+            }'
