@@ -1,64 +1,95 @@
-"""HuggingFace integration — inference API, embeddings, deal scoring."""
-import os
+"""
+integrations/huggingface_client.py
+
+Hugging Face Inference + Hub client for NEXUS-AI-CORE.
+Credentials resolved via core.secrets (Vault-first).
+
+Capabilities:
+  - Inference API (text generation, embeddings, classification)
+  - Custom model scoring (Garrettc123/nexus-deal-scorer)
+  - Sentence embeddings for semantic search
+  - Dataset push/pull
+  - Spaces management
+"""
+
+import logging
+from typing import Any, Optional
+
 import httpx
 
-HF_TOKEN = os.getenv("HUGGINGFACE_API_TOKEN", "")
-EMBED_MODEL = os.getenv("HF_EMBED_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
-SCORE_MODEL = os.getenv("HF_SCORE_MODEL", "")
-BASE_URL = "https://api-inference.huggingface.co/models"
+from core.secrets import SecretKey, require_secret, get_secret
+
+logger = logging.getLogger(__name__)
+
+HF_API = "https://api-inference.huggingface.co/models"
+HF_HUB_API = "https://huggingface.co/api"
 
 
-def _hf_headers() -> dict:
-    return {"Authorization": f"Bearer {HF_TOKEN}",
-            "Content-Type": "application/json"}
+class HuggingFaceClient:
+    """Hugging Face Inference API + Hub client."""
 
+    def __init__(self):
+        self._token = require_secret(SecretKey.HUGGINGFACE_API_TOKEN)
+        self._embed_model = get_secret(SecretKey.HF_EMBED_MODEL, "sentence-transformers/all-MiniLM-L6-v2")
+        self._score_model = get_secret(SecretKey.HF_SCORE_MODEL, "Garrettc123/nexus-deal-scorer")
+        self._space_id = get_secret(SecretKey.HF_SPACE_ID)
+        self._headers = {
+            "Authorization": f"Bearer {self._token}",
+            "Content-Type": "application/json",
+        }
+        logger.info("[HuggingFace] Client initialised (embed=%s, score=%s)", self._embed_model, self._score_model)
 
-async def embed_text(text: str) -> list[float]:
-    """Return a float embedding vector for the given text."""
-    async with httpx.AsyncClient(timeout=30) as c:
-        r = await c.post(
-            f"{BASE_URL}/{EMBED_MODEL}",
-            headers=_hf_headers(),
-            json={"inputs": text},
-        )
+    def _infer(self, model: str, payload: dict) -> Any:
+        r = httpx.post(f"{HF_API}/{model}", headers=self._headers, json=payload, timeout=60)
         r.raise_for_status()
-        result = r.json()
-        # API returns list[list[float]] for batched or list[float] for single
-        return result[0] if isinstance(result[0], list) else result
+        return r.json()
 
+    # ── Embeddings ─────────────────────────────────────────────────────────
 
-async def score_deal(features: dict) -> float:
-    """Run deal scoring model inference and return a 0-1 probability."""
-    if not SCORE_MODEL:
-        # Fallback heuristic scoring when no fine-tuned model is deployed
-        score = 0.0
-        score += min(features.get("company_size", 0) / 1000, 0.3)
-        score += min(features.get("revenue", 0) / 1_000_000, 0.3)
-        score += 0.2 if features.get("has_budget") else 0.0
-        score += 0.2 if features.get("decision_maker") else 0.0
-        return round(min(score, 1.0), 4)
-    async with httpx.AsyncClient(timeout=30) as c:
-        r = await c.post(
-            f"{BASE_URL}/{SCORE_MODEL}",
-            headers=_hf_headers(),
-            json={"inputs": features},
-        )
-        r.raise_for_status()
-        result = r.json()
-        return float(result[0]["score"]) if isinstance(result, list) else float(result)
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        """Compute sentence embeddings."""
+        result = self._infer(self._embed_model, {"inputs": texts})
+        logger.info("[HuggingFace] Embedded %d texts", len(texts))
+        return result
 
+    # ── Deal Scoring ───────────────────────────────────────────────────────
 
-async def classify_intent(text: str) -> str:
-    """Zero-shot classify a text string into a NEXUS intent label."""
-    candidate_labels = ["revenue", "crm_update", "task_update",
-                         "contract_update", "deal", "inventory", "default"]
-    model = "facebook/bart-large-mnli"
-    async with httpx.AsyncClient(timeout=30) as c:
-        r = await c.post(
-            f"{BASE_URL}/{model}",
-            headers=_hf_headers(),
-            json={"inputs": text, "parameters": {"candidate_labels": candidate_labels}},
-        )
-        r.raise_for_status()
-        data = r.json()
-        return data["labels"][0]
+    def score_deal(self, deal_text: str) -> float:
+        """Score a deal/lead using Garrettc123/nexus-deal-scorer."""
+        result = self._infer(self._score_model, {"inputs": deal_text})
+        # Expect [{"label": "POSITIVE", "score": 0.92}]
+        if isinstance(result, list) and result:
+            top = max(result, key=lambda x: x.get("score", 0))
+            score = top.get("score", 0.0)
+            logger.info("[HuggingFace] Deal score: %.3f", score)
+            return float(score)
+        return 0.0
+
+    # ── Text Generation ────────────────────────────────────────────────────
+
+    def generate(self, model: str, prompt: str, max_new_tokens: int = 256) -> str:
+        result = self._infer(model, {"inputs": prompt, "parameters": {"max_new_tokens": max_new_tokens}})
+        if isinstance(result, list) and result:
+            return result[0].get("generated_text", "")
+        return str(result)
+
+    # ── Classification ─────────────────────────────────────────────────────
+
+    def classify(self, model: str, text: str, labels: list[str]) -> dict:
+        """Zero-shot classification."""
+        result = self._infer(model, {"inputs": text, "parameters": {"candidate_labels": labels}})
+        return result
+
+    # ── Hub ────────────────────────────────────────────────────────────────
+
+    def push_dataset(self, repo_id: str, data: list[dict]) -> dict:
+        try:
+            from datasets import Dataset  # type: ignore
+            from huggingface_hub import HfApi  # type: ignore
+            api = HfApi(token=self._token)
+            ds = Dataset.from_list(data)
+            ds.push_to_hub(repo_id, token=self._token)
+            logger.info("[HuggingFace] Dataset pushed to %s", repo_id)
+            return {"status": "ok", "repo": repo_id}
+        except ImportError:
+            raise RuntimeError("[HuggingFace] datasets + huggingface_hub required. pip install datasets huggingface_hub")

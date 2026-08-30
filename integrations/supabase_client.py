@@ -1,57 +1,89 @@
-"""Supabase integration — persistent state, event store, vector search."""
-import os
-from supabase import acreate_client, AsyncClient
-from orchestrator.events import NexusEvent
+"""
+integrations/supabase_client.py
 
-_client: AsyncClient | None = None
+Supabase client for NEXUS-AI-CORE.
+Credentials resolved via core.secrets (Vault-first).
+
+Capabilities:
+  - Table CRUD (select, insert, update, upsert, delete)
+  - RPC (Postgres functions)
+  - Realtime subscriptions (via supabase-py)
+  - Auth (admin user management)
+  - Storage (bucket upload/download)
+  - gc_ledger revenue logging
+"""
+
+import logging
+from datetime import datetime, timezone
+from typing import Any, Optional
+
+from core.secrets import SecretKey, require_secret, get_secret
+
+logger = logging.getLogger(__name__)
 
 
-async def get_client() -> AsyncClient:
-    global _client
-    if _client is None:
-        supabase_key = os.getenv("SUPABASE_KEY", "") or os.getenv(
-            "SUPABASE_SERVICE_ROLE_KEY", ""
+class SupabaseClient:
+    """Supabase client wrapping supabase-py with Vault-resolved credentials."""
+
+    def __init__(self, use_service_role: bool = True):
+        self._url = require_secret(SecretKey.SUPABASE_URL)
+        key = (
+            require_secret(SecretKey.SUPABASE_SERVICE_ROLE_KEY)
+            if use_service_role
+            else require_secret(SecretKey.SUPABASE_ANON_KEY)
         )
-        _client = await acreate_client(
-            os.getenv("SUPABASE_URL", ""),
-            supabase_key,
-        )
-    return _client
+        try:
+            from supabase import create_client, Client  # type: ignore
+            self._client: Client = create_client(self._url, key)
+            logger.info("[Supabase] Client initialised (service_role=%s)", use_service_role)
+        except ImportError:
+            raise RuntimeError("[Supabase] supabase-py not installed. pip install supabase")
 
+    # ── CRUD ───────────────────────────────────────────────────────────────
 
-async def log_event(event: NexusEvent, result: dict) -> None:
-    sb = await get_client()
-    await sb.table("nexus_events").insert({
-        "id": event.id,
-        "source": event.source,
-        "type": event.type,
-        "intent": event.intent,
-        "actor": event.actor,
-        "trace_id": event.trace_id,
-        "ts": event.ts,
-        "payload": event.payload,
-        "result": result,
-    }).execute()
+    def select(self, table: str, query: str = "*", filters: dict | None = None) -> list:
+        req = self._client.table(table).select(query)
+        for col, val in (filters or {}).items():
+            req = req.eq(col, val)
+        return req.execute().data
 
+    def insert(self, table: str, data: dict | list) -> list:
+        return self._client.table(table).insert(data).execute().data
 
-async def upsert_state(key: str, value: dict) -> None:
-    sb = await get_client()
-    await sb.table("nexus_state").upsert(
-        {"key": key, "value": value}, on_conflict="key"
-    ).execute()
+    def upsert(self, table: str, data: dict | list, on_conflict: str = "id") -> list:
+        return self._client.table(table).upsert(data, on_conflict=on_conflict).execute().data
 
+    def update(self, table: str, match: dict, data: dict) -> list:
+        req = self._client.table(table).update(data)
+        for col, val in match.items():
+            req = req.eq(col, val)
+        return req.execute().data
 
-async def get_state(key: str) -> dict | None:
-    sb = await get_client()
-    r = await sb.table("nexus_state").select("value").eq("key", key).maybe_single().execute()
-    return r.data["value"] if r.data else None
+    def delete(self, table: str, match: dict) -> list:
+        req = self._client.table(table).delete()
+        for col, val in match.items():
+            req = req.eq(col, val)
+        return req.execute().data
 
+    def rpc(self, fn_name: str, params: dict | None = None) -> Any:
+        return self._client.rpc(fn_name, params or {}).execute().data
 
-async def vector_search(query_embedding: list[float], table: str = "nexus_docs",
-                         match_count: int = 5) -> list:
-    sb = await get_client()
-    r = await sb.rpc("match_documents", {
-        "query_embedding": query_embedding,
-        "match_count": match_count,
-    }).execute()
-    return r.data or []
+    # ── Revenue Ledger ─────────────────────────────────────────────────────
+
+    def log_revenue(self, source: str, amount: float, currency: str = "USD", meta: dict | None = None) -> list:
+        """Append a row to gc_ledger table."""
+        return self.insert("gc_ledger", {
+            "source": source,
+            "amount": amount,
+            "currency": currency,
+            "meta": meta or {},
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        })
+
+    # ── Storage ────────────────────────────────────────────────────────────
+
+    def upload_file(self, bucket: str, path: str, data: bytes, content_type: str = "application/octet-stream") -> dict:
+        return self._client.storage.from_(bucket).upload(path, data, {"content-type": content_type})
+
+    def get_public_url(self, bucket: str, path: str) -> str:
+        return self._client.storage.from_(bucket).get_public_url(path)

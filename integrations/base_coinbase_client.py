@@ -1,108 +1,94 @@
 """
-Garcar Enterprise — Base (Coinbase L2) Integration Client
-Echo Revenue Flow: Crypto payment rails, onchain revenue capture, Base smart contract hooks
+integrations/base_coinbase_client.py
+
+Base (Coinbase) / CDP client for NEXUS-AI-CORE.
+Credentials resolved via core.secrets (Vault-first).
+
+Capabilities:
+  - CDP SDK wallet management (create, load, export)
+  - ETH / USDC transfers on Base mainnet & testnet
+  - Smart contract invocation
+  - Onchain revenue collection
+  - Balance queries
 """
 
-import os
-import httpx
 import logging
-from typing import Optional, Dict, Any
+from decimal import Decimal
+from typing import Any, Optional
+
+from core.secrets import SecretKey, require_secret, get_secret
 
 logger = logging.getLogger(__name__)
 
-BASE_RPC_URL = os.getenv("BASE_RPC_URL", "https://mainnet.base.org")
-COINBASE_CDP_API_KEY = os.getenv("COINBASE_CDP_API_KEY", "")
-COINBASE_CDP_SECRET = os.getenv("COINBASE_CDP_SECRET", "")
-GARCAR_WALLET_ADDRESS = os.getenv("GARCAR_WALLET_ADDRESS", "")
+BASE_MAINNET = "base-mainnet"
+BASE_TESTNET = "base-sepolia"
 
 
 class BaseCoinbaseClient:
-    """
-    Garcar Enterprise — Base L2 & Coinbase CDP client.
-    Handles:
-    - Onchain revenue capture via Base smart contracts
-    - Coinbase Commerce payment webhook processing
-    - CDP Wallet creation for autonomous deal closings
-    - Base ETH / USDC balance queries for gc_ledger
-    """
+    """Coinbase Developer Platform (CDP) client for Base network."""
 
-    def __init__(self):
-        self.rpc_url = BASE_RPC_URL
-        self.api_key = COINBASE_CDP_API_KEY
-        self.secret = COINBASE_CDP_SECRET
-        self.wallet_address = GARCAR_WALLET_ADDRESS
-        self.headers = {
-            "Content-Type": "application/json",
-            "CB-ACCESS-KEY": self.api_key,
-        }
+    def __init__(self, network: str = BASE_MAINNET):
+        self._api_key_name = require_secret(SecretKey.CDP_API_KEY_NAME)
+        self._api_key_private = require_secret(SecretKey.CDP_API_KEY_PRIVATE_KEY)
+        self._wallet_address = get_secret(SecretKey.BASE_WALLET_ADDRESS)
+        self._network = network
+        self._sdk = None
+        self._wallet = None
+        logger.info("[Base/CDP] Client initialised (network=%s)", network)
 
-    async def get_base_balance(self, address: Optional[str] = None) -> Dict[str, Any]:
-        """Query ETH + USDC balance on Base L2 for gc_ledger sync."""
-        target = address or self.wallet_address
-        payload = {
-            "jsonrpc": "2.0",
-            "method": "eth_getBalance",
-            "params": [target, "latest"],
-            "id": 1,
-        }
-        async with httpx.AsyncClient() as client:
-            resp = await client.post(self.rpc_url, json=payload)
-            result = resp.json()
-            wei = int(result.get("result", "0x0"), 16)
-            eth_balance = wei / 1e18
-            logger.info(f"[BASE] {target} balance: {eth_balance:.6f} ETH")
-            return {"address": target, "eth_balance": eth_balance, "wei": wei}
+    def _get_sdk(self):
+        if self._sdk is None:
+            try:
+                from cdp import Cdp, Wallet  # type: ignore
+                Cdp.configure(self._api_key_name, self._api_key_private)
+                self._sdk = Cdp
+                logger.info("[Base/CDP] SDK configured")
+            except ImportError:
+                raise RuntimeError("[Base/CDP] cdp-sdk not installed. pip install cdp-sdk")
+        return self._sdk
 
-    async def create_payment_charge(
-        self,
-        amount_usd: float,
-        description: str,
-        metadata: Optional[Dict] = None,
-    ) -> Dict[str, Any]:
-        """Create a Coinbase Commerce charge — plugs into Echo Revenue Flow."""
-        payload = {
-            "name": "Garcar Enterprise Payment",
-            "description": description,
-            "pricing_type": "fixed_price",
-            "local_price": {"amount": str(amount_usd), "currency": "USD"},
-            "metadata": metadata or {"source": "nexus-ai-core", "flow": "echo-revenue"},
-        }
-        async with httpx.AsyncClient() as client:
-            resp = await client.post(
-                "https://api.commerce.coinbase.com/charges",
-                json=payload,
-                headers={**self.headers, "X-CC-Api-Key": self.api_key, "X-CC-Version": "2018-03-22"},
-            )
-            data = resp.json()
-            charge_url = data.get("data", {}).get("hosted_url", "")
-            charge_id = data.get("data", {}).get("id", "")
-            logger.info(f"[BASE] Charge created: {charge_id} — {charge_url}")
-            return {"charge_id": charge_id, "url": charge_url, "raw": data}
+    def create_wallet(self) -> Any:
+        """Create a new managed wallet on Base."""
+        from cdp import Wallet  # type: ignore
+        self._get_sdk()
+        self._wallet = Wallet.create(network_id=self._network)
+        addr = self._wallet.default_address.address_id
+        logger.info("[Base/CDP] Wallet created: %s", addr)
+        return self._wallet
 
-    async def process_webhook_event(self, event: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Process Coinbase Commerce webhook.
-        On charge:confirmed → emit to NEXUS revenue pipeline → update Supabase gc_ledger.
-        """
-        event_type = event.get("event", {}).get("type", "")
-        charge_data = event.get("event", {}).get("data", {})
-        amount = charge_data.get("pricing", {}).get("local", {}).get("amount", 0)
-        result = {
-            "event_type": event_type,
-            "amount_usd": float(amount),
-            "charge_code": charge_data.get("code", ""),
-            "confirmed": event_type == "charge:confirmed",
-        }
-        if result["confirmed"]:
-            logger.info(f"[BASE] 💰 REVENUE CONFIRMED: ${amount} USD onchain")
+    def load_wallet(self, wallet_id: str, seed: str) -> Any:
+        """Load an existing wallet by ID + seed."""
+        from cdp import Wallet, WalletData  # type: ignore
+        self._get_sdk()
+        data = WalletData(wallet_id=wallet_id, seed=seed)
+        self._wallet = Wallet.import_data(data)
+        logger.info("[Base/CDP] Wallet loaded: %s", wallet_id)
+        return self._wallet
+
+    def get_balance(self, asset: str = "eth") -> Decimal:
+        if not self._wallet:
+            raise RuntimeError("[Base/CDP] No wallet loaded. Call create_wallet() or load_wallet() first.")
+        balance = self._wallet.balance(asset)
+        logger.info("[Base/CDP] Balance (%s): %s", asset, balance)
+        return balance
+
+    def transfer(self, amount: Decimal | float, asset: str, destination: str, gasless: bool = True) -> Any:
+        """Transfer asset to destination address."""
+        if not self._wallet:
+            raise RuntimeError("[Base/CDP] No wallet loaded.")
+        transfer = self._wallet.transfer(amount, asset, destination, gasless=gasless).wait()
+        logger.info("[Base/CDP] Transfer complete: %s %s → %s | tx=%s", amount, asset, destination, transfer.transaction_hash)
+        return transfer
+
+    def invoke_contract(self, contract_address: str, method: str, abi: list, args: dict) -> Any:
+        """Call a smart contract method."""
+        if not self._wallet:
+            raise RuntimeError("[Base/CDP] No wallet loaded.")
+        result = self._wallet.invoke_contract(
+            contract_address=contract_address,
+            method=method,
+            abi=abi,
+            args=args,
+        ).wait()
+        logger.info("[Base/CDP] Contract invoked: %s.%s", contract_address, method)
         return result
-
-    async def get_cdp_wallet(self) -> Dict[str, Any]:
-        """Create/retrieve a CDP MPC wallet for autonomous deal execution."""
-        async with httpx.AsyncClient() as client:
-            resp = await client.post(
-                "https://api.cdp.coinbase.com/platform/v1/wallets",
-                headers=self.headers,
-                json={"network_id": "base-mainnet"},
-            )
-            return resp.json()

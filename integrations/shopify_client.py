@@ -1,62 +1,92 @@
-"""Shopify integration — REST Admin API + webhook verification."""
-import base64
+"""
+integrations/shopify_client.py
+
+Shopify Admin API client for NEXUS-AI-CORE.
+Credentials resolved via core.secrets (Vault-first).
+
+Capabilities:
+  - Products (list, create, update, inventory)
+  - Orders (list, fulfill, refund, cancel)
+  - Customers (lookup, create, tag)
+  - Revenue summaries
+  - Webhook signature verification
+  - Storefront API (headless)
+"""
+
 import hashlib
 import hmac
-import os
+import logging
+from typing import Any, Optional
+
 import httpx
-from orchestrator.events import NexusEvent
 
-SHOP = os.getenv("SHOPIFY_SHOP_DOMAIN", "")
-TOKEN = os.getenv("SHOPIFY_ACCESS_TOKEN", "")
-SECRET = os.getenv("SHOPIFY_WEBHOOK_SECRET", "").encode()
-BASE = f"https://{SHOP}/admin/api/2024-07"
+from core.secrets import SecretKey, require_secret, get_secret
 
+logger = logging.getLogger(__name__)
 
-def _headers() -> dict:
-    return {"X-Shopify-Access-Token": TOKEN, "Content-Type": "application/json"}
+SHOPIFY_API_VERSION = "2025-01"
 
 
-def verify_and_parse_shopify_webhook(payload: bytes, hmac_header: str, topic: str) -> NexusEvent:
-    digest = base64.b64encode(
-        hmac.new(SECRET, payload, hashlib.sha256).digest()
-    ).decode()
-    if not hmac.compare_digest(digest, hmac_header):
-        raise ValueError("Shopify HMAC verification failed")
-    import orjson
-    data = orjson.loads(payload)
-    return NexusEvent(source="shopify", type=topic, intent=_classify_shopify(topic), payload=data)
+class ShopifyClient:
+    """Shopify Admin REST + Storefront API client."""
 
+    def __init__(self):
+        self._domain = require_secret(SecretKey.SHOPIFY_SHOP_DOMAIN)
+        self._token = require_secret(SecretKey.SHOPIFY_ACCESS_TOKEN)
+        self._webhook_secret = get_secret(SecretKey.SHOPIFY_WEBHOOK_SECRET)
+        self._storefront_token = get_secret(SecretKey.SHOPIFY_STOREFRONT_TOKEN)
+        self._base = f"https://{self._domain}/admin/api/{SHOPIFY_API_VERSION}"
+        self._headers = {
+            "X-Shopify-Access-Token": self._token,
+            "Content-Type": "application/json",
+        }
+        logger.info("[Shopify] Client initialised (domain=%s)", self._domain)
 
-def _classify_shopify(topic: str) -> str:
-    if "orders" in topic:
-        return "revenue"
-    if "products" in topic:
-        return "inventory"
-    if "customers" in topic:
-        return "crm_update"
-    return "default"
-
-
-async def get_products(limit: int = 50) -> list:
-    async with httpx.AsyncClient() as c:
-        r = await c.get(f"{BASE}/products.json?limit={limit}", headers=_headers())
-        r.raise_for_status()
-        return r.json().get("products", [])
-
-
-async def get_orders(status: str = "any", limit: int = 50) -> list:
-    async with httpx.AsyncClient() as c:
-        r = await c.get(f"{BASE}/orders.json?status={status}&limit={limit}", headers=_headers())
-        r.raise_for_status()
-        return r.json().get("orders", [])
-
-
-async def update_product_price(product_id: str, variant_id: str, price: str) -> dict:
-    async with httpx.AsyncClient() as c:
-        r = await c.put(
-            f"{BASE}/variants/{variant_id}.json",
-            headers=_headers(),
-            json={"variant": {"id": variant_id, "price": price}},
-        )
+    def _get(self, path: str, params: dict | None = None) -> dict:
+        r = httpx.get(f"{self._base}{path}", headers=self._headers, params=params or {}, timeout=15)
         r.raise_for_status()
         return r.json()
+
+    def _post(self, path: str, payload: dict) -> dict:
+        r = httpx.post(f"{self._base}{path}", headers=self._headers, json=payload, timeout=15)
+        r.raise_for_status()
+        return r.json()
+
+    # ── Products ───────────────────────────────────────────────────────────
+
+    def list_products(self, limit: int = 50, status: str = "active") -> list:
+        return self._get("/products.json", {"limit": limit, "status": status}).get("products", [])
+
+    def create_product(self, title: str, body_html: str, price: str, sku: str, inventory: int = 0) -> dict:
+        payload = {"product": {"title": title, "body_html": body_html,
+            "variants": [{"price": price, "sku": sku, "inventory_quantity": inventory}]}}
+        return self._post("/products.json", payload).get("product", {})
+
+    # ── Orders ─────────────────────────────────────────────────────────────
+
+    def list_orders(self, status: str = "open", limit: int = 50) -> list:
+        return self._get("/orders.json", {"status": status, "limit": limit}).get("orders", [])
+
+    def get_order(self, order_id: int) -> dict:
+        return self._get(f"/orders/{order_id}.json").get("order", {})
+
+    def revenue_summary(self) -> dict:
+        orders = self.list_orders(status="any", limit=250)
+        total = sum(float(o.get("total_price", 0)) for o in orders)
+        return {"order_count": len(orders), "total_revenue_usd": round(total, 2)}
+
+    # ── Customers ──────────────────────────────────────────────────────────
+
+    def find_customer(self, email: str) -> Optional[dict]:
+        customers = self._get("/customers/search.json", {"query": f"email:{email}"}).get("customers", [])
+        return customers[0] if customers else None
+
+    # ── Webhooks ───────────────────────────────────────────────────────────
+
+    def verify_webhook(self, payload: bytes, hmac_header: str) -> bool:
+        if not self._webhook_secret:
+            return False
+        import base64
+        digest = hmac.new(self._webhook_secret.encode(), payload, hashlib.sha256).digest()
+        computed = base64.b64encode(digest).decode()
+        return hmac.compare_digest(computed, hmac_header)

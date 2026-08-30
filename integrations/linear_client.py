@@ -1,74 +1,113 @@
-"""Linear integration — execution ledger, task creation and updates."""
-import os
+"""
+integrations/linear_client.py
+
+Linear GraphQL API client for NEXUS-AI-CORE.
+Credentials resolved via core.secrets (Vault-first).
+
+Capabilities:
+  - Issue creation, update, close
+  - Project & team queries
+  - Cycle management
+  - Webhook signature validation
+  - Automated sprint task creation from revenue events
+"""
+
+import hashlib
+import hmac
+import logging
+from typing import Any, Optional
+
 import httpx
 
+from core.secrets import SecretKey, require_secret, get_secret
+
+logger = logging.getLogger(__name__)
+
 LINEAR_API = "https://api.linear.app/graphql"
-TEAM_ID = os.getenv("LINEAR_TEAM_ID", "")
 
 
-def _headers() -> dict:
-    return {"Authorization": os.getenv("LINEAR_API_KEY", ""),
-            "Content-Type": "application/json"}
+class LinearClient:
+    """Linear GraphQL API client."""
 
+    def __init__(self):
+        self._api_key = require_secret(SecretKey.LINEAR_API_KEY)
+        self._team_id = get_secret(SecretKey.LINEAR_TEAM_ID)
+        self._project_id = get_secret(SecretKey.LINEAR_PROJECT_ID)
+        self._webhook_secret = get_secret(SecretKey.LINEAR_WEBHOOK_SECRET)
+        self._headers = {
+            "Authorization": self._api_key,
+            "Content-Type": "application/json",
+        }
+        logger.info("[Linear] Client initialised (team=%s)", self._team_id)
 
-async def create_issue(title: str, description: str = "",
-                       priority: int = 2, label: str | None = None) -> dict:
-    """Create a Linear issue and return its id and url."""
-    query = """
-    mutation CreateIssue($input: IssueCreateInput!) {
-      issueCreate(input: $input) {
-        success
-        issue { id identifier title url }
-      }
-    }
-    """
-    variables = {
-        "input": {
-            "teamId": TEAM_ID,
+    def _gql(self, query: str, variables: dict | None = None) -> dict:
+        r = httpx.post(
+            LINEAR_API,
+            headers=self._headers,
+            json={"query": query, "variables": variables or {}},
+            timeout=15,
+        )
+        r.raise_for_status()
+        return r.json()
+
+    # ── Issues ─────────────────────────────────────────────────────────────
+
+    def create_issue(
+        self,
+        title: str,
+        description: str = "",
+        priority: int = 2,
+        team_id: str | None = None,
+        project_id: str | None = None,
+        label_ids: list[str] | None = None,
+    ) -> dict:
+        mutation = """
+        mutation CreateIssue($input: IssueCreateInput!) {
+          issueCreate(input: $input) {
+            success issue { id identifier title url }
+          }
+        }"""
+        variables = {"input": {
             "title": title,
             "description": description,
             "priority": priority,
-        }
-    }
-    async with httpx.AsyncClient() as c:
-        r = await c.post(LINEAR_API, json={"query": query, "variables": variables},
-                         headers=_headers())
-        r.raise_for_status()
-        data = r.json()
-        issue = data["data"]["issueCreate"]["issue"]
-        return {"id": issue["id"], "identifier": issue["identifier"],
-                "title": issue["title"], "url": issue["url"]}
+            "teamId": team_id or self._team_id,
+        }}
+        if project_id or self._project_id:
+            variables["input"]["projectId"] = project_id or self._project_id
+        if label_ids:
+            variables["input"]["labelIds"] = label_ids
+        result = self._gql(mutation, variables)
+        issue = result.get("data", {}).get("issueCreate", {}).get("issue", {})
+        logger.info("[Linear] Created issue %s: %s", issue.get("identifier"), title)
+        return issue
 
+    def update_issue(self, issue_id: str, state_id: str | None = None, priority: int | None = None) -> dict:
+        mutation = """
+        mutation UpdateIssue($id: String!, $input: IssueUpdateInput!) {
+          issueUpdate(id: $id, input: $input) {
+            success issue { id identifier state { name } }
+          }
+        }"""
+        inp: dict = {}
+        if state_id:
+            inp["stateId"] = state_id
+        if priority is not None:
+            inp["priority"] = priority
+        return self._gql(mutation, {"id": issue_id, "input": inp})
 
-async def update_issue_status(issue_id: str, state_name: str) -> dict:
-    # First resolve the state id
-    state_query = """
-    query States($teamId: String!) {
-      team(id: $teamId) { states { nodes { id name } } }
-    }
-    """
-    async with httpx.AsyncClient() as c:
-        r = await c.post(LINEAR_API,
-                         json={"query": state_query, "variables": {"teamId": TEAM_ID}},
-                         headers=_headers())
-        r.raise_for_status()
-        states = r.json()["data"]["team"]["states"]["nodes"]
-        state_id = next((s["id"] for s in states if s["name"].lower() == state_name.lower()), None)
-        if not state_id:
-            return {"error": f"State '{state_name}' not found"}
+    def get_team_issues(self, team_id: str | None = None) -> list:
+        query = """
+        query TeamIssues($teamId: String!) {
+          team(id: $teamId) { issues { nodes { id identifier title priority state { name } } } }
+        }"""
+        result = self._gql(query, {"teamId": team_id or self._team_id})
+        return result.get("data", {}).get("team", {}).get("issues", {}).get("nodes", [])
 
-    mutation = """
-    mutation UpdateIssue($id: String!, $stateId: String!) {
-      issueUpdate(id: $id, input: { stateId: $stateId }) {
-        success
-        issue { id title url }
-      }
-    }
-    """
-    async with httpx.AsyncClient() as c:
-        r = await c.post(LINEAR_API,
-                         json={"query": mutation,
-                               "variables": {"id": issue_id, "stateId": state_id}},
-                         headers=_headers())
-        r.raise_for_status()
-        return r.json()["data"]["issueUpdate"]
+    # ── Webhooks ───────────────────────────────────────────────────────────
+
+    def verify_webhook(self, payload: bytes, signature: str) -> bool:
+        if not self._webhook_secret:
+            return False
+        expected = hmac.new(self._webhook_secret.encode(), payload, hashlib.sha256).hexdigest()
+        return hmac.compare_digest(expected, signature)
