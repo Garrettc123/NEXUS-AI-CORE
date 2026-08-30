@@ -21,7 +21,11 @@ def verify_and_parse_stripe_webhook(payload: bytes, sig_header: str) -> NexusEve
 
 
 def _classify_stripe(event_type: str) -> str:
-    if "payment_intent" in event_type or "charge" in event_type:
+    if (
+        "payment_intent" in event_type
+        or "charge" in event_type
+        or "checkout.session" in event_type
+    ):
         return "revenue"
     if "customer.subscription" in event_type:
         return "revenue"

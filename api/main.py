@@ -244,7 +244,7 @@ async def _send_outreach_email(to_email: str, checkout_url: str, score: int) -> 
             "https://api.sendgrid.com/v3/mail/send",
             json=payload,
             headers={
-                "Authorization": "******",
+                "Authorization": "Bearer " + SENDGRID_API_KEY,
                 "Content-Type": "application/json",
             },
             timeout=15,
