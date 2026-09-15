@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "sendgrid": {
+      "command": "npx",
+      "args": ["-y", "mcp-sendgrid-server"],
+      "env": {
+        "SENDGRID_API_KEY": "${SENDGRID_API_KEY}"
+      }
+    }
+  }
+}
