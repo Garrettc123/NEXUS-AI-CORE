@@ -1,5 +1,7 @@
 """Lead Capture API — Non-Paid Acquisition System (GAR-486).
 
+Mounted on the NEXUS gateway via app.main include_router.
+
 Endpoints:
   POST /leads                  — capture lead, dedupe by email
   GET  /leads/{lead_id}        — lead + live score + events
@@ -14,7 +16,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 import structlog
-from fastapi import FastAPI, HTTPException
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, EmailStr
 
 from core.lead_scorer import score_lead, is_qualified
@@ -22,11 +24,7 @@ from integrations.supabase_client import get_client
 
 log = structlog.get_logger()
 
-app = FastAPI(
-    title="NEXUS Acquisition API",
-    version="1.0.0",
-    description="Non-Paid Acquisition System — GAR-486",
-)
+router = APIRouter(tags=["acquisition"])
 
 SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY", "")
 SENDGRID_FROM_EMAIL = os.getenv("SENDGRID_FROM_EMAIL", "noreply@garcar.io")
@@ -51,12 +49,11 @@ class EventCreate(BaseModel):
 
 # ── POST /leads ──────────────────────────────────────────────────────────────
 
-@app.post("/leads", status_code=201)
+@router.post("/leads", status_code=201)
 async def capture_lead(body: LeadCreate) -> dict:
     """Capture a lead; deduplicates by email."""
     sb = await get_client()
 
-    # Deduplicate
     existing = (
         await sb.table("leads")
         .select("id, email, source, status, score, created_at, updated_at")
@@ -90,7 +87,7 @@ async def capture_lead(body: LeadCreate) -> dict:
 
 # ── GET /leads/{lead_id} ─────────────────────────────────────────────────────
 
-@app.get("/leads/{lead_id}")
+@router.get("/leads/{lead_id}")
 async def get_lead(lead_id: str) -> dict:
     """Return lead with live score and events."""
     sb = await get_client()
@@ -115,7 +112,7 @@ async def get_lead(lead_id: str) -> dict:
 
 # ── POST /leads/{lead_id}/score ──────────────────────────────────────────────
 
-@app.post("/leads/{lead_id}/score")
+@router.post("/leads/{lead_id}/score")
 async def rescore_lead(lead_id: str) -> dict:
     """Re-score a lead; triggers conversion flow when score ≥ 70."""
     sb = await get_client()
@@ -133,7 +130,6 @@ async def rescore_lead(lead_id: str) -> dict:
     scored = score_lead(lead_res.data, events)
     score = scored["score"]
 
-    # Persist updated score
     await (
         sb.table("leads")
         .update({"score": score, "updated_at": datetime.now(timezone.utc).isoformat()})
@@ -146,13 +142,17 @@ async def rescore_lead(lead_id: str) -> dict:
         triggered = await _trigger_conversion(sb, lead_res.data, score)
 
     log.info("lead_rescored", lead_id=lead_id, score=score, triggered=triggered)
-    return {"lead_id": lead_id, "score": score, "qualified": is_qualified(score),
-            "conversion_triggered": triggered}
+    return {
+        "lead_id": lead_id,
+        "score": score,
+        "qualified": is_qualified(score),
+        "conversion_triggered": triggered,
+    }
 
 
 # ── POST /leads/{lead_id}/events ─────────────────────────────────────────────
 
-@app.post("/leads/{lead_id}/events", status_code=201)
+@router.post("/leads/{lead_id}/events", status_code=201)
 async def log_lead_event(lead_id: str, body: EventCreate) -> dict:
     """Log an engagement event for a lead."""
     sb = await get_client()
@@ -197,7 +197,6 @@ async def _trigger_conversion(sb: Any, lead: dict, score: int) -> bool:
     except Exception as exc:
         log.warning("sendgrid_outreach_failed", error=str(exc), email=email)
 
-    # Mark as qualified and record conversion row
     now = datetime.now(timezone.utc).isoformat()
     await (
         sb.table("leads")

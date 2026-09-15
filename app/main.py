@@ -15,6 +15,7 @@ from agents.deal_pipeline_agent import DealPipelineAgent
 from agents.lead_scoring_agent import LeadScoringAgent
 from agents.property_scoring_agent import PropertyScoringAgent
 from agents.revenue_loop_agent import RevenueLoopAgent
+from api.main import router as acquisition_router
 from integrations.supabase_client import get_client
 
 stripe.api_key = os.getenv("STRIPE_SECRET_KEY", "")
@@ -60,9 +61,12 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="NEXUS-AI-CORE Gateway",
-    version="3.0.0",
+    version="3.1.0",
     lifespan=lifespan,
 )
+
+# GAR-486 Non-Paid Acquisition: POST/GET /leads*
+app.include_router(acquisition_router)
 
 
 @app.post("/lead")
