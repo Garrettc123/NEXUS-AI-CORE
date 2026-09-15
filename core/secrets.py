@@ -92,6 +92,7 @@ class SecretKey(str, Enum):
 
     # SendGrid
     SENDGRID_API_KEY         = "SENDGRID_API_KEY"
+    SENDGRID_FROM_EMAIL      = "SENDGRID_FROM_EMAIL"
 
     # DocuSign
     DOCUSIGN_INTEGRATION_KEY = "DOCUSIGN_INTEGRATION_KEY"
@@ -162,6 +163,7 @@ VAULT_MAP: dict[str, tuple[str, str]] = {
     "HUBSPOT_PORTAL_ID":        ("secret/data/garcar/hubspot", "HUBSPOT_PORTAL_ID"),
     # SendGrid
     "SENDGRID_API_KEY":         ("secret/data/garcar/sendgrid", "SENDGRID_API_KEY"),
+    "SENDGRID_FROM_EMAIL":      ("secret/data/garcar/sendgrid", "SENDGRID_FROM_EMAIL"),
     # DocuSign
     "DOCUSIGN_INTEGRATION_KEY": ("secret/data/garcar/docusign", "DOCUSIGN_INTEGRATION_KEY"),
     "DOCUSIGN_USER_ID":         ("secret/data/garcar/docusign", "DOCUSIGN_USER_ID"),

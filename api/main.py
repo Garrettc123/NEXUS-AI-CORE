@@ -10,7 +10,6 @@ End-to-end breakthrough loop:
 """
 from __future__ import annotations
 
-import os
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -21,6 +20,7 @@ from pydantic import BaseModel, EmailStr
 
 from agents.engagement_agent import EngagementAgent
 from core.lead_scorer import score_lead, is_qualified
+from integrations.sendgrid_client import get_sendgrid
 from integrations.supabase_client import get_client
 
 log = structlog.get_logger()
@@ -28,15 +28,10 @@ log = structlog.get_logger()
 router = APIRouter(tags=["acquisition"])
 _engagement = EngagementAgent()
 
-SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY", "")
-SENDGRID_FROM_EMAIL = os.getenv("SENDGRID_FROM_EMAIL", "noreply@garcar.io")
-
-
-# ── Pydantic models ──────────────────────────────────────────────────────────
 
 class LeadCreate(BaseModel):
     email: EmailStr
-    source: str = "direct"              # organic | referral | direct
+    source: str = "direct"
     utm_source: str = ""
     utm_medium: str = ""
     first_name: str = ""
@@ -47,8 +42,6 @@ class EventCreate(BaseModel):
     event_type: str
     metadata: dict[str, Any] = {}
 
-
-# ── POST /leads ──────────────────────────────────────────────────────────────
 
 @router.post("/leads", status_code=201)
 async def capture_lead(body: LeadCreate) -> dict:
@@ -64,7 +57,6 @@ async def capture_lead(body: LeadCreate) -> dict:
     )
     if existing.data:
         log.info("lead_duplicate", email=body.email, id=existing.data["id"])
-        # Re-engage duplicates that went cold
         engagement = await _engagement.engage_lead(existing.data, reason="duplicate_reengage")
         return {
             "lead_id": existing.data["id"],
@@ -91,10 +83,7 @@ async def capture_lead(body: LeadCreate) -> dict:
     await sb.table("leads").insert(row).execute()
     log.info("lead_captured", lead_id=lead_id, email=body.email, source=body.source)
 
-    # Breakthrough: engage within the same request path (seconds, not hours)
     engagement = await _engagement.engage_lead(row, reason="capture")
-
-    # Immediate first score after engagement event lands
     score_result = await _rescore_and_maybe_convert(sb, lead_id)
 
     return {
@@ -106,13 +95,9 @@ async def capture_lead(body: LeadCreate) -> dict:
     }
 
 
-# ── GET /leads/{lead_id} ─────────────────────────────────────────────────────
-
 @router.get("/leads/{lead_id}")
 async def get_lead(lead_id: str) -> dict:
-    """Return lead with live score and events."""
     sb = await get_client()
-
     lead_res = (
         await sb.table("leads").select("*").eq("id", lead_id).maybe_single().execute()
     )
@@ -131,22 +116,15 @@ async def get_lead(lead_id: str) -> dict:
     return {"lead": scored, "events": events}
 
 
-# ── POST /leads/{lead_id}/score ──────────────────────────────────────────────
-
 @router.post("/leads/{lead_id}/score")
 async def rescore_lead(lead_id: str) -> dict:
-    """Re-score a lead; triggers conversion flow when score ≥ 70."""
     sb = await get_client()
     return await _rescore_and_maybe_convert(sb, lead_id)
 
 
-# ── POST /leads/{lead_id}/events ─────────────────────────────────────────────
-
 @router.post("/leads/{lead_id}/events", status_code=201)
 async def log_lead_event(lead_id: str, body: EventCreate) -> dict:
-    """Log engagement event and auto-rescore (learning loop)."""
     sb = await get_client()
-
     lead_res = (
         await sb.table("leads").select("id").eq("id", lead_id).maybe_single().execute()
     )
@@ -165,9 +143,7 @@ async def log_lead_event(lead_id: str, body: EventCreate) -> dict:
     await sb.table("lead_events").insert(row).execute()
     log.info("lead_event_logged", lead_id=lead_id, event_type=body.event_type)
 
-    # Every signal compounds the score
     score_result = await _rescore_and_maybe_convert(sb, lead_id)
-
     return {
         "event_id": event_id,
         "lead_id": lead_id,
@@ -176,7 +152,11 @@ async def log_lead_event(lead_id: str, body: EventCreate) -> dict:
     }
 
 
-# ── Shared rescore + conversion ──────────────────────────────────────────────
+@router.get("/sendgrid/health")
+async def sendgrid_health() -> dict:
+    """Probe SendGrid configuration (MCP health surface)."""
+    return await get_sendgrid().health()
+
 
 async def _rescore_and_maybe_convert(sb: Any, lead_id: str) -> dict:
     lead_res = (
@@ -213,7 +193,6 @@ async def _rescore_and_maybe_convert(sb: Any, lead_id: str) -> dict:
 
 
 async def _trigger_conversion(sb: Any, lead: dict, score: int) -> bool:
-    """Create Stripe checkout session and send SendGrid outreach email."""
     email = lead["email"]
     checkout_url = ""
     try:
@@ -226,7 +205,17 @@ async def _trigger_conversion(sb: Any, lead: dict, score: int) -> bool:
         log.warning("stripe_checkout_failed", error=str(exc), email=email)
 
     try:
-        await _send_conversion_email(email, checkout_url, score)
+        await get_sendgrid().send_email(
+            to=email,
+            subject="You've been selected — Garcar Enterprise",
+            text=(
+                f"Hi,\n\nYour engagement score of {score} qualifies you for "
+                f"Garcar Enterprise.\n\nStart here: {checkout_url}\n\n"
+                "The Garcar Team"
+            ),
+            categories=["conversion", "qualified"],
+            custom_args={"lead_id": lead["id"], "score": str(score)},
+        )
     except Exception as exc:
         log.warning("sendgrid_outreach_failed", error=str(exc), email=email)
 
@@ -248,37 +237,3 @@ async def _trigger_conversion(sb: Any, lead: dict, score: int) -> bool:
     }).execute()
     log.info("conversion_triggered", lead_id=lead["id"], score=score, url=checkout_url)
     return True
-
-
-async def _send_conversion_email(to_email: str, checkout_url: str, score: int) -> None:
-    """Qualified-path outreach with checkout link."""
-    if not SENDGRID_API_KEY:
-        log.info("sendgrid_skipped_no_key", email=to_email)
-        return
-    import httpx
-    payload = {
-        "personalizations": [{"to": [{"email": to_email}]}],
-        "from": {"email": SENDGRID_FROM_EMAIL},
-        "subject": "You've been selected — Garcar Enterprise",
-        "content": [
-            {
-                "type": "text/plain",
-                "value": (
-                    f"Hi,\n\nYour engagement score of {score} qualifies you for "
-                    f"Garcar Enterprise.\n\nStart here: {checkout_url}\n\n"
-                    "The Garcar Team"
-                ),
-            }
-        ],
-    }
-    async with httpx.AsyncClient() as c:
-        r = await c.post(
-            "https://api.sendgrid.com/v3/mail/send",
-            json=payload,
-            headers={
-                "Authorization": "Bearer " + SENDGRID_API_KEY,
-                "Content-Type": "application/json",
-            },
-            timeout=15,
-        )
-        r.raise_for_status()
