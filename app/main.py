@@ -12,6 +12,7 @@ from pydantic import BaseModel, EmailStr
 import stripe
 
 from agents.deal_pipeline_agent import DealPipelineAgent
+from agents.engagement_agent import EngagementAgent
 from agents.lead_scoring_agent import LeadScoringAgent
 from agents.property_scoring_agent import PropertyScoringAgent
 from agents.revenue_loop_agent import RevenueLoopAgent
@@ -45,8 +46,10 @@ async def lifespan(app: FastAPI):
     app.state.deal_pipeline_agent = DealPipelineAgent()
     app.state.property_scoring_agent = PropertyScoringAgent()
     app.state.revenue_loop_agent = RevenueLoopAgent()
+    app.state.engagement_agent = EngagementAgent()
 
     scheduler = AsyncIOScheduler()
+    scheduler.add_job(app.state.engagement_agent.run_pending, "interval", minutes=1)
     scheduler.add_job(app.state.lead_scoring_agent.run_pending, "interval", minutes=3)
     scheduler.add_job(app.state.deal_pipeline_agent.run_pending, "interval", minutes=5)
     scheduler.add_job(app.state.property_scoring_agent.run_pending, "interval", minutes=7)
@@ -61,11 +64,11 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="NEXUS-AI-CORE Gateway",
-    version="3.1.0",
+    version="3.2.0",
     lifespan=lifespan,
 )
 
-# GAR-486 Non-Paid Acquisition: POST/GET /leads*
+# GAR-486 Non-Paid Acquisition + agentic engagement loop
 app.include_router(acquisition_router)
 
 
@@ -130,4 +133,9 @@ async def stripe_webhook(
 
 @app.get("/health")
 async def health() -> dict:
-    return {"status": "ok", "service": "nexus-ai-core"}
+    return {
+        "status": "ok",
+        "service": "nexus-ai-core",
+        "version": "3.2.0",
+        "loops": ["engagement", "scoring", "conversion", "revenue"],
+    }
