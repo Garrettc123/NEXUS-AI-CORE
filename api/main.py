@@ -2,11 +2,11 @@
 
 Mounted on the NEXUS gateway via app.main include_router.
 
-Endpoints:
-  POST /leads                  — capture lead, dedupe by email
+End-to-end breakthrough loop:
+  POST /leads                  — capture + instant engagement (sub-minute)
   GET  /leads/{lead_id}        — lead + live score + events
-  POST /leads/{lead_id}/score  — re-score; triggers conversion if qualified
-  POST /leads/{lead_id}/events — log engagement event
+  POST /leads/{lead_id}/score  — re-score; score >= 70 -> Stripe + SendGrid
+  POST /leads/{lead_id}/events — log event + auto-rescore (learning loop)
 """
 from __future__ import annotations
 
@@ -19,16 +19,17 @@ import structlog
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, EmailStr
 
+from agents.engagement_agent import EngagementAgent
 from core.lead_scorer import score_lead, is_qualified
 from integrations.supabase_client import get_client
 
 log = structlog.get_logger()
 
 router = APIRouter(tags=["acquisition"])
+_engagement = EngagementAgent()
 
 SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY", "")
 SENDGRID_FROM_EMAIL = os.getenv("SENDGRID_FROM_EMAIL", "noreply@garcar.io")
-STRIPE_STARTER_PRICE_ID = os.getenv("STRIPE_PRICE_ID_STARTER", "")
 
 
 # ── Pydantic models ──────────────────────────────────────────────────────────
@@ -51,19 +52,26 @@ class EventCreate(BaseModel):
 
 @router.post("/leads", status_code=201)
 async def capture_lead(body: LeadCreate) -> dict:
-    """Capture a lead; deduplicates by email."""
+    """Capture a lead, dedupe by email, fire instant engagement."""
     sb = await get_client()
 
     existing = (
         await sb.table("leads")
-        .select("id, email, source, status, score, created_at, updated_at")
+        .select("id, email, source, status, score, created_at, updated_at, first_name, last_name")
         .eq("email", body.email)
         .maybe_single()
         .execute()
     )
     if existing.data:
         log.info("lead_duplicate", email=body.email, id=existing.data["id"])
-        return {"lead_id": existing.data["id"], "created": False, "lead": existing.data}
+        # Re-engage duplicates that went cold
+        engagement = await _engagement.engage_lead(existing.data, reason="duplicate_reengage")
+        return {
+            "lead_id": existing.data["id"],
+            "created": False,
+            "lead": existing.data,
+            "engagement": engagement,
+        }
 
     lead_id = str(uuid.uuid4())
     now = datetime.now(timezone.utc).isoformat()
@@ -82,7 +90,20 @@ async def capture_lead(body: LeadCreate) -> dict:
     }
     await sb.table("leads").insert(row).execute()
     log.info("lead_captured", lead_id=lead_id, email=body.email, source=body.source)
-    return {"lead_id": lead_id, "created": True, "lead": row}
+
+    # Breakthrough: engage within the same request path (seconds, not hours)
+    engagement = await _engagement.engage_lead(row, reason="capture")
+
+    # Immediate first score after engagement event lands
+    score_result = await _rescore_and_maybe_convert(sb, lead_id)
+
+    return {
+        "lead_id": lead_id,
+        "created": True,
+        "lead": row,
+        "engagement": engagement,
+        "score": score_result,
+    }
 
 
 # ── GET /leads/{lead_id} ─────────────────────────────────────────────────────
@@ -116,7 +137,48 @@ async def get_lead(lead_id: str) -> dict:
 async def rescore_lead(lead_id: str) -> dict:
     """Re-score a lead; triggers conversion flow when score ≥ 70."""
     sb = await get_client()
+    return await _rescore_and_maybe_convert(sb, lead_id)
 
+
+# ── POST /leads/{lead_id}/events ─────────────────────────────────────────────
+
+@router.post("/leads/{lead_id}/events", status_code=201)
+async def log_lead_event(lead_id: str, body: EventCreate) -> dict:
+    """Log engagement event and auto-rescore (learning loop)."""
+    sb = await get_client()
+
+    lead_res = (
+        await sb.table("leads").select("id").eq("id", lead_id).maybe_single().execute()
+    )
+    if not lead_res.data:
+        raise HTTPException(status_code=404, detail="Lead not found")
+
+    event_id = str(uuid.uuid4())
+    now = datetime.now(timezone.utc).isoformat()
+    row = {
+        "id": event_id,
+        "lead_id": lead_id,
+        "event_type": body.event_type,
+        "metadata": body.metadata,
+        "created_at": now,
+    }
+    await sb.table("lead_events").insert(row).execute()
+    log.info("lead_event_logged", lead_id=lead_id, event_type=body.event_type)
+
+    # Every signal compounds the score
+    score_result = await _rescore_and_maybe_convert(sb, lead_id)
+
+    return {
+        "event_id": event_id,
+        "lead_id": lead_id,
+        "event_type": body.event_type,
+        "score": score_result,
+    }
+
+
+# ── Shared rescore + conversion ──────────────────────────────────────────────
+
+async def _rescore_and_maybe_convert(sb: Any, lead_id: str) -> dict:
     lead_res = (
         await sb.table("leads").select("*").eq("id", lead_id).maybe_single().execute()
     )
@@ -150,35 +212,6 @@ async def rescore_lead(lead_id: str) -> dict:
     }
 
 
-# ── POST /leads/{lead_id}/events ─────────────────────────────────────────────
-
-@router.post("/leads/{lead_id}/events", status_code=201)
-async def log_lead_event(lead_id: str, body: EventCreate) -> dict:
-    """Log an engagement event for a lead."""
-    sb = await get_client()
-
-    lead_res = (
-        await sb.table("leads").select("id").eq("id", lead_id).maybe_single().execute()
-    )
-    if not lead_res.data:
-        raise HTTPException(status_code=404, detail="Lead not found")
-
-    event_id = str(uuid.uuid4())
-    now = datetime.now(timezone.utc).isoformat()
-    row = {
-        "id": event_id,
-        "lead_id": lead_id,
-        "event_type": body.event_type,
-        "metadata": body.metadata,
-        "created_at": now,
-    }
-    await sb.table("lead_events").insert(row).execute()
-    log.info("lead_event_logged", lead_id=lead_id, event_type=body.event_type)
-    return {"event_id": event_id, "lead_id": lead_id, "event_type": body.event_type}
-
-
-# ── Conversion trigger ───────────────────────────────────────────────────────
-
 async def _trigger_conversion(sb: Any, lead: dict, score: int) -> bool:
     """Create Stripe checkout session and send SendGrid outreach email."""
     email = lead["email"]
@@ -193,7 +226,7 @@ async def _trigger_conversion(sb: Any, lead: dict, score: int) -> bool:
         log.warning("stripe_checkout_failed", error=str(exc), email=email)
 
     try:
-        await _send_outreach_email(email, checkout_url, score)
+        await _send_conversion_email(email, checkout_url, score)
     except Exception as exc:
         log.warning("sendgrid_outreach_failed", error=str(exc), email=email)
 
@@ -217,8 +250,8 @@ async def _trigger_conversion(sb: Any, lead: dict, score: int) -> bool:
     return True
 
 
-async def _send_outreach_email(to_email: str, checkout_url: str, score: int) -> None:
-    """Send a personalised outreach email via SendGrid."""
+async def _send_conversion_email(to_email: str, checkout_url: str, score: int) -> None:
+    """Qualified-path outreach with checkout link."""
     if not SENDGRID_API_KEY:
         log.info("sendgrid_skipped_no_key", email=to_email)
         return
