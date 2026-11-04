@@ -7,6 +7,28 @@ stripe.api_key = os.getenv("STRIPE_SECRET_KEY", "")
 WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "")
 
 
+class StripeClient:
+    """Thin async Stripe client used by the Echo Revenue Flow."""
+
+    async def create_payment_intent(
+        self,
+        amount_cents: int,
+        customer_email: str = "",
+        metadata: dict | None = None,
+    ) -> dict:
+        intent = stripe.PaymentIntent.create(
+            amount=amount_cents,
+            currency="usd",
+            receipt_email=customer_email or None,
+            metadata=metadata or {},
+        )
+        return {
+            "id": intent.id,
+            "status": intent.status,
+            "client_secret": intent.client_secret,
+        }
+
+
 def verify_and_parse_stripe_webhook(payload: bytes, sig_header: str) -> NexusEvent:
     try:
         event = stripe.Webhook.construct_event(payload, sig_header, WEBHOOK_SECRET)

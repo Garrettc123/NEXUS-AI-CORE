@@ -87,3 +87,16 @@ class SupabaseClient:
 
     def get_public_url(self, bucket: str, path: str) -> str:
         return self._client.storage.from_(bucket).get_public_url(path)
+
+
+# ── Shared instance ─────────────────────────────────────────────────────
+
+_instance: Optional[SupabaseClient] = None
+
+
+async def get_client(use_service_role: bool = True) -> SupabaseClient:
+    """Async factory returning the shared SupabaseClient instance."""
+    global _instance
+    if _instance is None:
+        _instance = SupabaseClient(use_service_role=use_service_role)
+    return _instance

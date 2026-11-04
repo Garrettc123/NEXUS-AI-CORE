@@ -56,3 +56,23 @@ async def get_pipeline_summary() -> list:
          "stage": d.properties.get("dealstage")}
         for d in deals
     ]
+
+
+class HubSpotClient:
+    """Thin async HubSpot client used by the Echo Revenue Flow."""
+
+    async def update_deal(
+        self,
+        deal_id: str,
+        stage: str,
+        amount: float | None = None,
+        close_date: str | None = None,
+    ) -> dict:
+        hs = get_client()
+        props: dict = {"dealstage": stage}
+        if amount is not None:
+            props["amount"] = amount
+        if close_date is not None:
+            props["closedate"] = close_date
+        updated = hs.crm.deals.basic_api.update(deal_id, DealCreate(properties=props))
+        return {"id": updated.id, "action": "updated"}

@@ -34,5 +34,5 @@ class TestEngagementAgentUnit:
         async def _run():
             return await agent.engage_lead({"id": "x"}, reason="test")
 
-        result = asyncio.get_event_loop().run_until_complete(_run())
+        result = asyncio.run(_run())
         assert result["status"] == "skipped"
