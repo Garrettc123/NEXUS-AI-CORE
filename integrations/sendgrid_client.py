@@ -10,7 +10,10 @@ Credentials via core.secrets (Vault → env → default).
 from __future__ import annotations
 
 import os
+import hashlib
+import json
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 import structlog
@@ -37,6 +40,48 @@ class SendGridClient:
     def configured(self) -> bool:
         return bool(self.api_key)
 
+    async def _outbound_approved(
+        self, policy_decision_id: str | None, payload: dict[str, Any]
+    ) -> bool:
+        """Redeem one payload-bound approval via trusted, one-time verifier."""
+        if not policy_decision_id or not policy_decision_id.strip():
+            return False
+
+        verify_url = os.getenv("OUTBOUND_APPROVAL_REDEEM_URL", "")
+        verify_token = get_secret("OUTBOUND_APPROVAL_SERVICE_TOKEN", "") or ""
+        parsed = urlparse(verify_url)
+        if parsed.scheme != "https" or not parsed.hostname or not verify_token:
+            return False
+
+        try:
+            payload_sha256 = hashlib.sha256(json.dumps(
+                payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+            ).encode("utf-8")).hexdigest()
+            async with httpx.AsyncClient(timeout=5) as client:
+                response = await client.post(
+                    verify_url,
+                    headers={"Authorization": f"Bearer {verify_token}"},
+                    json={
+                        "policy_decision_id": policy_decision_id,
+                        "action": "sendgrid.send",
+                        "payload_sha256": payload_sha256,
+                    },
+                )
+            if response.status_code != 200:
+                return False
+            decision = response.json()
+            return (
+                isinstance(decision, dict)
+                and decision.get("approved") is True
+                and decision.get("consumed") is True
+                and decision.get("policy_decision_id") == policy_decision_id
+                and decision.get("action") == "sendgrid.send"
+                and decision.get("payload_sha256") == payload_sha256
+            )
+        except (httpx.HTTPError, TypeError, ValueError) as exc:
+            log.warning("outbound_approval_check_failed", error=type(exc).__name__)
+            return False
+
     def _headers(self) -> dict[str, str]:
         return {
             "Authorization": f"Bearer {self.api_key}",
@@ -55,6 +100,7 @@ class SendGridClient:
         reply_to: str | None = None,
         categories: list[str] | None = None,
         custom_args: dict[str, str] | None = None,
+        policy_decision_id: str | None = None,
     ) -> dict[str, Any]:
         """Send a transactional email. Returns status payload."""
         if not self.configured:
@@ -93,6 +139,10 @@ class SendGridClient:
         if categories:
             payload["categories"] = categories[:10]
 
+        if not await self._outbound_approved(policy_decision_id, payload):
+            log.warning("outbound_blocked", channel="sendgrid", reason="approval_required")
+            return {"ok": False, "skipped": True, "reason": "approval_required"}
+
         async with httpx.AsyncClient(timeout=20) as client:
             r = await client.post(
                 f"{SENDGRID_API}/mail/send",
@@ -129,6 +179,7 @@ class SendGridClient:
         dynamic_data: dict[str, Any] | None = None,
         from_email: str | None = None,
         from_name: str | None = None,
+        policy_decision_id: str | None = None,
     ) -> dict[str, Any]:
         """Send using a SendGrid dynamic template."""
         if not self.configured:
@@ -149,6 +200,10 @@ class SendGridClient:
             },
             "template_id": template_id,
         }
+
+        if not await self._outbound_approved(policy_decision_id, payload):
+            log.warning("outbound_blocked", channel="sendgrid_template", reason="approval_required")
+            return {"ok": False, "skipped": True, "reason": "approval_required"}
 
         async with httpx.AsyncClient(timeout=20) as client:
             r = await client.post(
