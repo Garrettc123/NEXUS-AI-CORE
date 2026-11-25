@@ -5,7 +5,7 @@ Mounted on the NEXUS gateway via app.main include_router.
 End-to-end breakthrough loop:
   POST /leads                  — capture + instant engagement (sub-minute)
   GET  /leads/{lead_id}        — lead + live score + events
-  POST /leads/{lead_id}/score  — re-score; score >= 70 -> Stripe + SendGrid
+  POST /leads/{lead_id}/score  — re-score; score >= 70 -> qualified pending approval
   POST /leads/{lead_id}/events — log event + auto-rescore (learning loop)
 """
 from __future__ import annotations
@@ -193,32 +193,11 @@ async def _rescore_and_maybe_convert(sb: Any, lead_id: str) -> dict:
 
 
 async def _trigger_conversion(sb: Any, lead: dict, score: int) -> bool:
-    email = lead["email"]
-    checkout_url = ""
-    try:
-        from integrations.stripe_client import create_payment_link
-        checkout_url = await create_payment_link(
-            amount_cents=9900,
-            description="Garcar Enterprise — Starter Plan",
-        )
-    except Exception as exc:
-        log.warning("stripe_checkout_failed", error=str(exc), email=email)
+    """Qualify without charging, creating payment links, or recording revenue.
 
-    try:
-        await get_sendgrid().send_email(
-            to=email,
-            subject="You've been selected — Garcar Enterprise",
-            text=(
-                f"Hi,\n\nYour engagement score of {score} qualifies you for "
-                f"Garcar Enterprise.\n\nStart here: {checkout_url}\n\n"
-                "The Garcar Team"
-            ),
-            categories=["conversion", "qualified"],
-            custom_args={"lead_id": lead["id"], "score": str(score)},
-        )
-    except Exception as exc:
-        log.warning("sendgrid_outreach_failed", error=str(exc), email=email)
-
+    Only a verified paid Stripe event may create a conversion record.
+    Human approval is required for outbound and payment-link creation.
+    """
     now = datetime.now(timezone.utc).isoformat()
     await (
         sb.table("leads")
@@ -226,14 +205,12 @@ async def _trigger_conversion(sb: Any, lead: dict, score: int) -> bool:
         .eq("id", lead["id"])
         .execute()
     )
-    await sb.table("conversions").insert({
+    await sb.table("lead_events").insert({
         "id": str(uuid.uuid4()),
         "lead_id": lead["id"],
-        "stripe_customer_id": "",
-        "amount": 9900,
-        "plan": "starter",
-        "converted_at": now,
-        "checkout_url": checkout_url,
+        "event_type": "qualified_pending_approval",
+        "metadata": {"score": score, "checkout_created": False, "outreach_sent": False},
+        "created_at": now,
     }).execute()
-    log.info("conversion_triggered", lead_id=lead["id"], score=score, url=checkout_url)
-    return True
+    log.info("lead_qualified_pending_approval", lead_id=lead["id"], score=score)
+    return False
