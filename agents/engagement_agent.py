@@ -94,7 +94,7 @@ class EngagementAgent:
 
         event_id = await self._log_event(
             lead_id,
-            event_type="engagement_sent",
+            event_type="engagement_sent" if email_sent else "engagement_blocked",
             metadata={
                 "reason": reason,
                 "source": source,
@@ -115,7 +115,7 @@ class EngagementAgent:
         )
         return {
             "agent": "EngagementAgent",
-            "status": "ok",
+            "status": "sent" if email_sent else "blocked",
             "lead_id": lead_id,
             "email_sent": email_sent,
             "event_id": event_id,
